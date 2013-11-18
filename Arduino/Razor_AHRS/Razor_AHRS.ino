@@ -19,6 +19,7 @@
  * SPI.setClockDivider(SPI_CLOCK_DIV8); 
  * Also, on a 16MHz master, add a 15 microsecond delay after sending SS active
  * (low), and 5 microseconds between calls to SPI.transfer().
+ * To check everything else is working, first test with SPI_CLOCK_DIV128
  *
  * The SPI functionality can work at the same time as the interactive mode,
  * but note that the YPR angles will be sent over SPI only when the output
@@ -34,7 +35,7 @@
 //#define INTERACTIVE
 // Define this to display debug messages relating to SPI
 //#define DEBUG__SPI
- 
+
 /***************************************************************************************************************
  * Razor AHRS Firmware v1.4
  * .2
@@ -278,6 +279,7 @@ boolean output_errors = false;  // true or false
 #define CALIBRATION__MAGN_USE_EXTENDED true
 const float magn_ellipsoid_center[3] = {156.987, -75.2171, 68.8484};
 const float magn_ellipsoid_transform[3][3] = {{0.889288, 0.0159297, -0.0293934}, {0.0159297, 0.871714, 0.0291347}, {-0.0293934, 0.0291347, 0.987273}};
+
 
 
 // Gyroscope
@@ -534,10 +536,10 @@ char readChar()
 #ifdef SPI_SLAVE
 volatile uint8_t ptrSPI;
 volatile boolean busySPI,updateSPI;
-#define SPI_MESSAGE_SIZE (2 * 3) // int16 x 3
+#define SPI_MESSAGE_SIZE (2 * 3 + 1) // int16 x 3 + crc
 #ifdef DEBUG__SPI
 volatile uint16_t countSPI;
-#endif
+#endif // DEBUG__SPI
 
 #pragma push(pack,1)
 uint8_t bufSPI[SPI_MESSAGE_SIZE];
@@ -548,23 +550,26 @@ int16_t radians100[3]; // YPR
 ISR (SPI_STC_vect)
 {
   byte c = SPDR;
-  if (c == 'R') // Reset/start
+  if (c == 'A') // Reset/start angles transmission
   {
     ptrSPI = 0;
     busySPI = true;
   }
   SPDR = bufSPI[ptrSPI++];
   if (ptrSPI == SPI_MESSAGE_SIZE)
+  {
     busySPI = false;
+    ptrSPI = 0;
+  }  
 #ifdef DEBUG__SPI
-  countSPI++;//!!!
-#endif
+  countSPI++;
+#endif // DEBUG__SPI
 }  // end of interrupt service routine (ISR) SPI_STC_vect
-#endif
+#endif // SPI_SLAVE
 
 void setup()
 {
-#ifdef INTERACTIVE
+#if defined(INTERACTIVE) || defined(DEBUG__SPI)
   // Init serial output
   Serial.begin(OUTPUT__BAUD_RATE);
 
@@ -603,8 +608,7 @@ void setup()
 
   // turn on interrupts
   SPCR |= _BV(SPIE);
-  // Does nothing (in linrary)   SPI.attachInterrupt();
-#endif
+#endif // SPI_SLAVE
 }
 
 void Calc_YPR()
@@ -639,19 +643,25 @@ void loop()
 #ifdef SPI_SLAVE
   if (updateSPI && !busySPI)
   {
-    noInterrupts(); // We don;t want to be changing the buffer while a transfer is happening
-    memcpy((void *)bufSPI,radians100,SPI_MESSAGE_SIZE);
+    noInterrupts(); // We don't want to be changing the buffer while a transfer is happening
+    // Todo: Improve logic to avoid small window between if and noInterrupts()
+    memcpy((void *)bufSPI,radians100,SPI_MESSAGE_SIZE-1);
     /* Test values for easy checking
-     bufSPI[0] = 1;
-     bufSPI[1] = 2;
-     bufSPI[2] = 3;
-     bufSPI[3] = 4;
-     bufSPI[4] = 5;
-     bufSPI[5] = 6;
+     bufSPI[0] = 0xAA;
+     bufSPI[1] = 0xBB;
+     bufSPI[2] = 0xCC;
+     bufSPI[3] = 0xDD;
+     bufSPI[4] = 0xEE;
+     bufSPI[5] = 0x55;
      */
+     bufSPI[SPI_MESSAGE_SIZE-1] = 0;
+     for (uint8_t i=0;i<SPI_MESSAGE_SIZE-1;i++)
+       bufSPI[SPI_MESSAGE_SIZE-1] ^= bufSPI[i];
     interrupts();
 #ifdef DEBUG__SPI
-    Serial.print("Updating YPR to SPI buf. SPI receive count ");
+    Serial.print("CRC is ");
+    Serial.print(bufSPI[SPI_MESSAGE_SIZE-1],HEX);
+    Serial.print("  Updating YPR to SPI buf. SPI receive count ");
     Serial.println(countSPI);
 #endif
     updateSPI = false;
